@@ -1,0 +1,127 @@
+WITH df AS (
+  SELECT r.reservation_id as res_id,
+    r.user_id as user_id,
+    CAST(REPLACE(r.rate, "US$", "") as decimal) as rate,
+    r.start_date as date,
+    CASE WHEN extract(dayofweek from r.start_date) = 1 THEN 'sunday'
+      WHEN extract(dayofweek from r.start_date) = 2 THEN 'monday'
+      WHEN extract(dayofweek from r.start_date) = 3 THEN 'tuesday'
+      WHEN extract(dayofweek from r.start_date) = 4 THEN 'wednesday'
+      WHEN extract(dayofweek from r.start_date) = 5 THEN 'thursday'
+      WHEN extract(dayofweek from r.start_date) = 6 THEN 'friday'
+      WHEN extract(dayofweek from r.start_date) = 7 THEN 'saturday'  
+      END AS day_of_week,
+    CASE WHEN r.start_date < '2022-10-15' THEN 'old'
+      ELSE 'new'
+      END AS rate_type, 
+    r.start_time as time,
+    CASE WHEN r.start_time in ('08:00:00', '09:00:00', '10:00:00', '10:30:00', '11:00:00', '11:30:00', '12:00:00') then 'morning'
+      WHEN r.start_time in ('12:30:00', '13:00:00', '14:00:00', '16:00:00') then 'afternoon'
+      ELSE 'evening'
+      END AS time_of_day,
+    SUBSTRING(c.class_name, 1, INSTR(c.class_name, ' ')) as class
+  FROM `involuted-bird-369120.nityac.res` as r
+  LEFT JOIN `involuted-bird-369120.nityac.class` as c
+  ON r.class_id = c.class_id),
+class_summary AS (
+  SELECT class,
+    count(distinct(res_id)) as total_res,
+    count(distinct(user_id)) as total_users,
+    sum(rate) as total_revenue,
+    round(sum(rate)/count(distinct(res_id)), 2) as avg_rev_per_class,
+    round(sum(rate)/count(distinct(user_id)), 2) as avg_rev_per_user
+  FROM df
+  GROUP BY class
+  order by 1
+),
+class_summary_split AS (
+  SELECT class, rate_type,
+    count(distinct(res_id)) as total_res,
+    count(distinct(user_id)) as total_users,
+    sum(rate) as total_revenue,
+    round(sum(rate)/count(distinct(res_id)),2) as avg_rev_per_class,
+    round(sum(rate)/count(distinct(user_id)),2) as avg_rev_per_user,
+  FROM df
+  GROUP BY class, rate_type
+  order by 1, 2
+),
+repeat_cust AS (
+  SELECT distinct(df.user_id), count(distinct(df.res_id)) AS total_res
+  FROM df
+  GROUP BY df.user_id
+  HAVING total_res > 1
+  ORDER BY 1, 2 desc
+),
+repeat_cust_split AS (
+  SELECT distinct(rc.user_id), df.rate_type, count(distinct(df.res_id)) AS total_res
+  FROM repeat_cust AS rc
+  LEFT JOIN df
+  ON df.user_id = rc.user_id
+  GROUP BY rc.user_id, df.rate_type
+  ORDER BY 1, 2
+),
+repeat_cust_summary AS (
+  SELECT distinct(rcs.user_id), sum(total_res) AS total_res,
+    CASE WHEN count(distinct(rcs.rate_type)) > 1 THEN true
+    ELSE FALSE
+    END stayed_after_rate_change
+  FROM repeat_cust_split AS rcs
+  GROUP BY rcs.user_id
+  ORDER BY 3, 2 DESC
+),
+retention_stats AS (
+  SELECT stayed_after_rate_change,
+    count(stayed_after_rate_change) as num_of_users,
+    sum(total_res) as total_res
+  FROM repeat_cust_summary
+  GROUP BY 1
+  ORDER BY 2
+), 
+rebook_rate_overall AS (
+  SELECT df.class,
+    count(distinct(rc.user_id)) AS num_repeat_cust,
+    count(distinct(df.user_id)) as num_total_cust,
+    round(100*count(distinct(rc.user_id))/count(distinct(df.user_id)), 2) AS rebook_rate
+  FROM df
+  LEFT JOIN repeat_cust AS rc
+  ON df.user_id = rc.user_id
+  GROUP BY df.class
+),
+rebook_rate_split AS (
+  SELECT df.class, df.rate_type,
+  count(distinct(rc.user_id)) AS num_repeat_cust,
+  count(distinct(df.user_id)) AS num_total_cust,
+  round(100*count(distinct(rc.user_id))/count(distinct(df.user_id)), 2) AS rebook_rate
+  FROM df
+  LEFT JOIN repeat_cust AS rc
+  ON df.user_id = rc.user_id
+  GROUP BY df.class, df.rate_type
+  ORDER BY 1, 2
+),
+weekdays_summary AS (
+  SELECT day_of_week,
+    class,
+    rate_type,
+    count(distinct(res_id)) as total_res,
+    round(avg(rate),2) as avg_rate
+  FROM df
+  GROUP BY day_of_week, rate_type, class
+  ORDER BY 1, 2, 3
+),
+time_of_day_summary AS (
+  SELECT time_of_day,
+    rate_type,
+    count(distinct(res_id)) as total_res,
+    round(avg(rate),2) as avg_rate
+  FROM df
+  GROUP BY time_of_day, rate_type
+  ORDER BY 1, 2, 3
+),
+res_spread_by_rate AS (
+  SELECT rate_type, sum(rate), count(distinct(df.res_id)) as total_res
+  FROM df
+  WHERE rate >= 20
+  GROUP BY rate_type
+  ORDER BY 1
+)
+select * from df;
